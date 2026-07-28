@@ -70,6 +70,7 @@ FAQEntry.objects.create(
 )
 
 SEUIL_PERTINENCE_FAQ = 0.28
+SEUIL_PERTINENCE_DOCUMENT = 0.15
 
 
 def _construire_corpus_faq():
@@ -100,3 +101,43 @@ def rechercher_faq(question):
         return meilleure_entree, meilleur_score
     else:
         return None, meilleur_score
+
+# La fonction `repondre` prend une question en entrée et tente de trouver une réponse appropriée en recherchant d'abord dans la FAQ, puis dans les documents. Si aucune réponse pertinente n'est trouvée, elle renvoie un message indiquant qu'aucune réponse fiable n'a été trouvée.
+def repondre(question):
+    entree, score_faq = rechercher_faq(question)
+
+    if entree is not None:
+        besoin = "RF3" if entree.est_guide else "RF1"
+        return {
+            "reponse": entree.reponse,
+            "besoin_fonctionnel": besoin,
+            "sources": [],
+        }
+#recherche dans les documents si aucune réponse pertinente n'est trouvée dans la FAQ
+    resultats = rechercher_documents(question, top_k=3)
+    resultats_pertinents = [
+        (doc, score) for doc, score in resultats
+        if score >= SEUIL_PERTINENCE_DOCUMENT
+    ]
+
+    if resultats_pertinents:
+        lignes = [f"- {doc.titre} : {doc.lien}" for doc, score in resultats_pertinents]
+        reponse = (
+            "Voici les documents qui correspondent le mieux à ta recherche :\n"
+            + "\n".join(lignes)
+        )
+        return {
+            "reponse": reponse,
+            "besoin_fonctionnel": "RF2",
+            "sources": [doc.lien for doc, score in resultats_pertinents],
+        }
+#en cas d'absence de réponse pertinente dans la FAQ et les documents, renvoyer un message par défaut
+    reponse = (
+        "Je suis désolé, je n'ai pas trouvé de réponse fiable à ce sujet. "
+        "N'hésite pas à reformuler ta question, ou à me demander autre chose."
+    )
+    return {
+        "reponse": reponse,
+        "besoin_fonctionnel": "RF5",
+        "sources": [],
+    }
