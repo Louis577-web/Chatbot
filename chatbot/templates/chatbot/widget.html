@@ -1,0 +1,143 @@
+<div id="chatbot-widget">
+    <div id="chatbot-header">Assistant Valideur LMD</div>
+    <div id="chatbot-messages"></div>
+    <form id="chatbot-form">
+        <input type="text" id="chatbot-input" placeholder="Comment puis-je vous aider ?" autocomplete="off">
+        <button type="submit">Envoyer</button>
+    </form>
+</div>
+
+<style>
+    #chatbot-widget {
+        position: fixed;
+        bottom: 24px;
+        right: 24px;
+        width: 340px;
+        height: 480px;
+        background-color: #FFFFFF;
+        border-radius: 16px;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.15);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        font-family: -apple-system, sans-serif;
+        z-index: 1000;
+    }
+
+    #chatbot-header {
+        background-color: #F97316;
+        color: #FFFFFF;
+        padding: 16px;
+        font-weight: bold;
+        font-size: 15px;
+    }
+
+    #chatbot-messages {
+        flex: 1;
+        padding: 16px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        background-color: #FFFFFF;
+    }
+
+    .message {
+        max-width: 80%;
+        padding: 10px 14px;
+        border-radius: 14px;
+        font-size: 14px;
+        line-height: 1.4;
+        white-space: pre-line;
+    }
+
+    .message.utilisateur {
+        align-self: flex-end;
+        background-color: #F97316;
+        color: #FFFFFF;
+        border-bottom-right-radius: 4px;
+    }
+
+    .message.bot {
+        align-self: flex-start;
+        background-color: #FFF3EC;
+        color: #2D2D2D;
+        border: 1px solid #FFDAB9;
+        border-bottom-left-radius: 4px;
+    }
+
+    #chatbot-form {
+        display: flex;
+        border-top: 1px solid #F0F0F0;
+        padding: 10px;
+        gap: 8px;
+    }
+
+    #chatbot-input {
+        flex: 1;
+        border: 1px solid #E0E0E0;
+        border-radius: 20px;
+        padding: 10px 14px;
+        font-size: 14px;
+        outline: none;
+    }
+
+    #chatbot-input:focus {
+        border-color: #F97316;
+    }
+
+    #chatbot-form button {
+        background-color: #F97316;
+        color: #FFFFFF;
+        border: none;
+        border-radius: 20px;
+        padding: 10px 18px;
+        font-size: 14px;
+        font-weight: bold;
+        cursor: pointer;
+    }
+
+    #chatbot-form button:hover {
+        background-color: #EA580C;
+    }
+</style>
+
+<script>
+    const form = document.getElementById("chatbot-form");
+    const input = document.getElementById("chatbot-input");
+    const messages = document.getElementById("chatbot-messages");
+
+    function ajouterMessage(texte, type) {
+        const bulle = document.createElement("div");
+        bulle.classList.add("message", type);
+        bulle.textContent = texte;
+        messages.appendChild(bulle);
+        messages.scrollTop = messages.scrollHeight;
+    }
+
+    form.addEventListener("submit", function (event) {
+        event.preventDefault();
+
+        const question = input.value.trim();
+        if (question === "") {
+            return;
+        }
+
+        ajouterMessage(question, "utilisateur");
+        input.value = "";
+
+        fetch("/api/chat/", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message: question }),
+        })
+            .then((response) => response.json())
+            .then((data) => {
+                ajouterMessage(data.reponse, "bot");
+            })
+            .catch((erreur) => {
+                console.error("Erreur lors de l'appel à l'API :", erreur);
+                ajouterMessage("Désolé, une erreur technique est survenue.", "bot");
+            });
+    });
+</script>

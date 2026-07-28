@@ -1,5 +1,4 @@
-#from django.shortcuts import render
-
+from django.shortcuts import render
 import json
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -17,3 +16,6 @@ def chat_api(request):
     resultat = repondre(message)
 
     return JsonResponse(resultat)
+
+def demo_page(request):
+    return render(request, "chatbot/demo_page.html")
