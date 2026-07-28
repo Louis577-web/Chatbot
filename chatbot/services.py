@@ -46,8 +46,7 @@ def rechercher_documents(question, top_k=3):
 
     return resultats[:top_k]
 
-from chatbot.models import FAQEntry
-
+from .models import DocumentValide, FAQEntry, Conversation
 FAQEntry.objects.create(
     question="Comment soumettre un document ?",
     reponse="Pour soumettre un document, connecte-toi à ton compte, va dans la section 'Déposer un document', puis suis les étapes indiquées.",
@@ -108,36 +107,39 @@ def repondre(question):
 
     if entree is not None:
         besoin = "RF3" if entree.est_guide else "RF1"
-        return {
-            "reponse": entree.reponse,
-            "besoin_fonctionnel": besoin,
-            "sources": [],
-        }
-#recherche dans les documents si aucune réponse pertinente n'est trouvée dans la FAQ
-    resultats = rechercher_documents(question, top_k=3)
-    resultats_pertinents = [
-        (doc, score) for doc, score in resultats
-        if score >= SEUIL_PERTINENCE_DOCUMENT
-    ]
+        reponse = entree.reponse
+        sources = []
+    else:
+        resultats = rechercher_documents(question, top_k=3)
+        resultats_pertinents = [
+            (doc, score) for doc, score in resultats
+            if score >= SEUIL_PERTINENCE_DOCUMENT
+        ]
 
-    if resultats_pertinents:
-        lignes = [f"- {doc.titre} : {doc.lien}" for doc, score in resultats_pertinents]
-        reponse = (
-            "Voici les documents qui correspondent le mieux à ta recherche :\n"
-            + "\n".join(lignes)
-        )
-        return {
-            "reponse": reponse,
-            "besoin_fonctionnel": "RF2",
-            "sources": [doc.lien for doc, score in resultats_pertinents],
-        }
-#en cas d'absence de réponse pertinente dans la FAQ et les documents, renvoyer un message par défaut
-    reponse = (
-        "Je suis désolé, je n'ai pas trouvé de réponse fiable à ce sujet. "
-        "N'hésite pas à reformuler ta question, ou à me demander autre chose."
+        if resultats_pertinents:
+            lignes = [f"- {doc.titre} : {doc.lien}" for doc, score in resultats_pertinents]
+            reponse = (
+                "Voici les documents qui correspondent le mieux à ta recherche :\n"
+                + "\n".join(lignes)
+            )
+            besoin = "RF2"
+            sources = [doc.lien for doc, score in resultats_pertinents]
+        else:
+            reponse = (
+                "Je suis désolé, je n'ai pas trouvé de réponse fiable à ce sujet. "
+                "N'hésite pas à reformuler ta question, ou à me demander autre chose."
+            )
+            besoin = "RF5"
+            sources = []
+
+    Conversation.objects.create(
+        question=question,
+        reponse=reponse,
+        besoin_fonctionnel=besoin,
     )
+
     return {
         "reponse": reponse,
-        "besoin_fonctionnel": "RF5",
-        "sources": [],
+        "besoin_fonctionnel": besoin,
+        "sources": sources,
     }
