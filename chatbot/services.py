@@ -12,7 +12,7 @@ MOTS_VIDES_FR = [
 def _construire_corpus_documents():
     documents = list(DocumentValide.objects.all())
     corpus = [
-        f"{doc.titre} {doc.matiere} {doc.niveau} {doc.etablissement}"
+        f"document {doc.titre} {doc.matiere} niveau {doc.niveau} etablissement {doc.etablissement}"
         for doc in documents
     ]
     return documents, corpus
