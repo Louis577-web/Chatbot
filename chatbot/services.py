@@ -21,12 +21,21 @@ MOTS_VIDES_FR = [
 _stemmer_fr = SnowballStemmer("french")
 
 
-def _analyseur_stemming(texte):
-    texte = texte.lower()
-    texte = ''.join(
-        c for c in unicodedata.normalize('NFKD', texte)
+def _normaliser_accents(texte):
+    """Minuscules + suppression des accents (ete -> e, series -> series,
+    Séries -> series). Utilise partout ou on doit comparer du texte issu
+    de sources differentes (question tapee sans accent vs titre en base
+    avec accent) : PostgreSQL ILIKE est sensible aux accents par defaut,
+    donc une comparaison cote base echouerait silencieusement sans ca
+    (teste et corrige - voir _candidats_par_mot_cle)."""
+    return ''.join(
+        c for c in unicodedata.normalize('NFKD', texte.lower())
         if not unicodedata.combining(c)
     )
+
+
+def _analyseur_stemming(texte):
+    texte = _normaliser_accents(texte)
     mots = re.findall(r"\b\w\w+\b", texte)
     return [_stemmer_fr.stem(mot) for mot in mots if mot not in MOTS_VIDES_FR]
 
@@ -51,6 +60,14 @@ POIDS_LEXICAL = 0.35
 CANDIDATS_SEMANTIQUES = 20
 SEUIL_SEMANTIQUE_CANDIDAT = 0.30
 
+# Seuil applique UNIQUEMENT quand aucun mot-cle de la question n'est
+# retrouve dans le titre/la description (score_lex == 0) : le bruit
+# semantique pur (documents hors-sujet) peut alors monter jusqu'a ~0.51
+# sur des questions sans reponse reelle dans le corpus, donc 0.35 ne
+# suffit pas a filtrer ce cas. Sans mot-cle pour confirmer, on exige un
+# score brut nettement plus haut.
+SEUIL_SEMANTIQUE_SANS_LEXICAL = 0.55
+
 # Mots "porteurs de requete" - le type de chose demandee plutot que son
 # sujet (ex: "je veux un DOCUMENT sur..."). Presents dans presque toutes
 # les descriptions quel que soit le sujet, ils fausseraient le score
@@ -66,6 +83,62 @@ _STEMS_GENERIQUES = {_stemmer_fr.stem(m) for m in MOTS_GENERIQUES_DEMANDE}
 
 def _stemmes_utiles(texte):
     return set(_analyseur_stemming(texte)) - _STEMS_GENERIQUES
+
+
+def _mots_cles_bruts(question):
+    """Comme _stemmes_utiles, mais renvoie les mots ORIGINAUX (non
+    stemmes, mais accents deja retires) : un stem (ex: "vector" pour
+    "vectoriel") n'est pas forcement une sous-chaine cherchable telle
+    quelle dans un titre, donc on a besoin des mots dans leur forme
+    normale pour la recherche complementaire par mot-cle (voir
+    _candidats_par_mot_cle)."""
+    texte = _normaliser_accents(question)
+    mots = re.findall(r"\b\w\w+\b", texte)
+    resultat = []
+    for mot in mots:
+        if mot in MOTS_VIDES_FR:
+            continue
+        if _stemmer_fr.stem(mot) in _STEMS_GENERIQUES:
+            continue
+        resultat.append(mot)
+    return resultat
+
+
+def _candidats_par_mot_cle(question, limite=10):
+    """Recherche complementaire DIRECTE dans les titres/descriptions,
+    pour ne jamais rater un document dont le titre contient litteralement
+    un mot-cle de la question, meme s'il n'est pas remonte dans le pool
+    des CANDIDATS_SEMANTIQUES meilleurs candidats par embeddings.
+
+    Teste et necessaire : pour la question "sujet d'examen sur les
+    series", le document "Suites et Series" scorait 0.56 en semantique
+    brut (largement pertinent) mais se classait 14e, juste hors du pool
+    de 20 candidats retenus avant re-classement - il n'apparaissait donc
+    jamais dans les resultats. Une reformulation minime le faisait
+    remonter au rang 7 et le document ressortait alors correctement :
+    preuve que la similarite d'embeddings seule est trop sensible a la
+    formulation exacte pour qu'on lui fasse confiance a elle seule.
+
+    Comparaison faite en PYTHON (pas via ILIKE cote base) : PostgreSQL
+    ILIKE est sensible aux accents par defaut, donc chercher "series"
+    (question tapee sans accent) ne matcherait pas "Séries" (titre avec
+    accent) - teste et confirme, meme piege que pour le diagnostic
+    precedent. Avec seulement 182 ressources au total, charger et
+    comparer en Python est trivial en performance et evite ce probleme
+    sans dependre d'une extension PostgreSQL (unaccent) potentiellement
+    indisponible sur une base geree en lecture seule."""
+    mots = _mots_cles_bruts(question)
+    if not mots:
+        return []
+
+    candidats = []
+    for ressource in Ressources.objects.select_related("ecole", "pays").all():
+        texte = _normaliser_accents(f"{ressource.nom} {ressource.description}")
+        if any(mot in texte for mot in mots):
+            candidats.append(ressource)
+            if len(candidats) >= limite:
+                break
+    return candidats
 
 
 def _score_lexical(question, texte):
@@ -120,38 +193,63 @@ def _construire_liens(ids_ressources):
 
 def rechercher_documents(question, top_k=3):
     """Recherche semantique dans le CONTENU reel des documents (PDF sur
-    Contabo), via l'index Chroma construit par indexer_documents, puis
+    Contabo), via l'index Chroma construit par indexer_documents,
+    COMPLETEE par une recherche directe par mot-cle (_candidats_par_mot_cle,
+    voir sa docstring pour le cas concret qui a motive cet ajout), puis
     RE-CLASSEMENT HYBRIDE : le score semantique brut ne suffit pas a bien
     ordonner les resultats a l'echelle des 182 documents reels (voir
-    POIDS_LEXICAL ci-dessus), donc on elargit d'abord le pool de
-    candidats (CANDIDATS_SEMANTIQUES), puis on reordonne en ajoutant un
-    bonus si les mots-cles de la question apparaissent dans le titre/la
+    POIDS_LEXICAL ci-dessus), donc on reordonne en ajoutant un bonus si
+    les mots-cles de la question apparaissent dans le titre/la
     description, avant de ne garder que les meilleurs top_k.
 
     Renvoie une liste de tuples (ressource, score, lien_ou_None)."""
     candidats = rechercher_par_contenu(
         question, top_k=CANDIDATS_SEMANTIQUES, score_min=SEUIL_SEMANTIQUE_CANDIDAT
     )
-    if not candidats:
+    scores_semantiques = dict(candidats)
+    ressources_par_id = {}
+    if scores_semantiques:
+        ressources_par_id = {
+            r.id: r for r in Ressources.objects.select_related("ecole", "pays")
+            .filter(id__in=scores_semantiques)
+        }
+
+    # Complement mot-cle : un document trouve ainsi mais absent du pool
+    # semantique recoit un score semantique "neutre" de 0 - c'est le bonus
+    # lexical (POIDS_LEXICAL) qui portera son score final, pas une
+    # similarite d'embeddings qu'on n'a pas calculee pour lui.
+    for ressource in _candidats_par_mot_cle(question):
+        if ressource.id not in scores_semantiques:
+            scores_semantiques[ressource.id] = 0.0
+            ressources_par_id[ressource.id] = ressource
+
+    if not scores_semantiques:
         return []
 
-    ids = [rid for rid, _ in candidats]
-    scores_semantiques = dict(candidats)
-    ressources_par_id = {
-        r.id: r for r in Ressources.objects.select_related("ecole", "pays").filter(id__in=ids)
-    }
-    liens_par_id = _construire_liens(ids)
+    liens_par_id = _construire_liens(list(scores_semantiques))
 
     sortie = []
-    for rid in ids:
+    for rid, score_sem in scores_semantiques.items():
         ressource = ressources_par_id.get(rid)
         if ressource is None:
             continue
-        score_sem = scores_semantiques[rid]
         score_lex = _score_lexical(question, f"{ressource.nom} {ressource.description}")
         score_final = score_sem + POIDS_LEXICAL * score_lex
-        if score_final >= SEUIL_PERTINENCE_DOCUMENT:
-            sortie.append((ressource, score_final, liens_par_id.get(rid)))
+
+        if score_lex == 0:
+            # Aucun mot-cle en commun avec le titre/la description : le
+            # bonus lexical ne peut pas confirmer la pertinence, donc on
+            # exige un score semantique brut nettement plus eleve. Teste
+            # sur une question sans reponse reelle dans les 182 documents
+            # ("sujet d'examen sur les series") : le bruit semantique pur
+            # montait jusqu'a 0.51 sans qu'aucun document ne soit vraiment
+            # pertinent - 0.35 est trop bas pour filtrer ce cas.
+            if score_sem < SEUIL_SEMANTIQUE_SANS_LEXICAL:
+                continue
+        elif score_final < SEUIL_PERTINENCE_DOCUMENT:
+            continue
+
+        sortie.append((ressource, score_final, liens_par_id.get(rid)))
 
     sortie.sort(key=lambda triplet: triplet[1], reverse=True)
     return sortie[:top_k]
