@@ -6,7 +6,6 @@
         <button type="submit">Envoyer</button>
     </form>
 </div>
-
 <style>
     #chatbot-widget {
         position: fixed;
@@ -23,7 +22,6 @@
         font-family: -apple-system, sans-serif;
         z-index: 1000;
     }
-
     #chatbot-header {
         background-color: #F97316;
         color: #FFFFFF;
@@ -31,7 +29,6 @@
         font-weight: bold;
         font-size: 15px;
     }
-
     #chatbot-messages {
         flex: 1;
         padding: 16px;
@@ -41,7 +38,6 @@
         gap: 10px;
         background-color: #FFFFFF;
     }
-
     .message {
         max-width: 80%;
         padding: 10px 14px;
@@ -50,14 +46,12 @@
         line-height: 1.4;
         white-space: pre-line;
     }
-
     .message.utilisateur {
         align-self: flex-end;
         background-color: #F97316;
         color: #FFFFFF;
         border-bottom-right-radius: 4px;
     }
-
     .message.bot {
         align-self: flex-start;
         background-color: #FFF3EC;
@@ -65,14 +59,39 @@
         border: 1px solid #FFDAB9;
         border-bottom-left-radius: 4px;
     }
-
+    .message.bot a {
+        color: #C2410C;
+        font-weight: bold;
+        word-break: break-all;
+    }
+    /* Indicateur "en train d'ecrire" : trois points qui rebondissent */
+    .message.bot.typing {
+        padding: 12px 16px;
+    }
+    .typing-dots {
+        display: flex;
+        gap: 4px;
+    }
+    .typing-dots span {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background-color: #F97316;
+        opacity: 0.5;
+        animation: rebond-typing 1.2s infinite ease-in-out both;
+    }
+    .typing-dots span:nth-child(1) { animation-delay: -0.32s; }
+    .typing-dots span:nth-child(2) { animation-delay: -0.16s; }
+    @keyframes rebond-typing {
+        0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+        40% { transform: scale(1); opacity: 1; }
+    }
     #chatbot-form {
         display: flex;
         border-top: 1px solid #F0F0F0;
         padding: 10px;
         gap: 8px;
     }
-
     #chatbot-input {
         flex: 1;
         border: 1px solid #E0E0E0;
@@ -81,11 +100,9 @@
         font-size: 14px;
         outline: none;
     }
-
     #chatbot-input:focus {
         border-color: #F97316;
     }
-
     #chatbot-form button {
         background-color: #F97316;
         color: #FFFFFF;
@@ -96,35 +113,83 @@
         font-weight: bold;
         cursor: pointer;
     }
-
     #chatbot-form button:hover {
         background-color: #EA580C;
     }
 </style>
-
 <script>
     const form = document.getElementById("chatbot-form");
     const input = document.getElementById("chatbot-input");
     const messages = document.getElementById("chatbot-messages");
 
+    // Identique au message renvoye par _est_salutation() cote serveur
+    // (chatbot/services.py) - affiche ici directement, sans appel API,
+    // pour eviter de journaliser une fausse conversation au chargement.
+    const MESSAGE_ACCUEIL = "Bonjour ! Je suis l'assistant de Valideur LMD. Pose-moi une question sur la plateforme, ou dis-moi quel document tu cherches.";
+
+    function echapperHTML(texte) {
+        const div = document.createElement("div");
+        div.textContent = texte;
+        return div.innerHTML;
+    }
+
+    // Transforme les URL (http/https) d'un texte en vraies balises <a>
+    // cliquables. Le texte est d'abord echappe (echapperHTML) pour eviter
+    // toute injection HTML, puis seules les URL detectees dans ce texte
+    // deja echappe sont entourees d'un <a> : sans risque d'injection.
+    function linkifier(texte) {
+        const echappe = echapperHTML(texte);
+        return echappe.replace(
+            /(https?:\/\/[^\s<]+)/g,
+            '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
+        );
+    }
+
     function ajouterMessage(texte, type) {
         const bulle = document.createElement("div");
         bulle.classList.add("message", type);
-        bulle.textContent = texte;
+        if (type === "bot") {
+            bulle.innerHTML = linkifier(texte);
+        } else {
+            bulle.textContent = texte;
+        }
         messages.appendChild(bulle);
         messages.scrollTop = messages.scrollHeight;
+        return bulle;
     }
+
+    // Affiche la bulle "en train d'ecrire" (trois points animes) et la
+    // renvoie, pour pouvoir la retirer des que la vraie reponse arrive.
+    function ajouterIndicateurFrappe() {
+        const bulle = document.createElement("div");
+        bulle.classList.add("message", "bot", "typing");
+        bulle.innerHTML = '<div class="typing-dots"><span></span><span></span><span></span></div>';
+        messages.appendChild(bulle);
+        messages.scrollTop = messages.scrollHeight;
+        return bulle;
+    }
+
+    function attendre(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    // Duree minimale d'affichage de l'indicateur de frappe. Sans ca, les
+    // reponses tres rapides (FAQ, salutations - aucun calcul d'embeddings
+    // ni requete distante) font apparaitre et disparaitre les points en
+    // une fraction de seconde : trop court pour voir le rebond.
+    const DELAI_MINIMUM_FRAPPE_MS = 600;
 
     form.addEventListener("submit", function (event) {
         event.preventDefault();
-
         const question = input.value.trim();
         if (question === "") {
             return;
         }
-
         ajouterMessage(question, "utilisateur");
         input.value = "";
+
+        const indicateur = ajouterIndicateurFrappe();
+        const debut = Date.now();
 
         fetch("/api/chat/", {
             method: "POST",
@@ -133,11 +198,20 @@
         })
             .then((response) => response.json())
             .then((data) => {
+                const ecoule = Date.now() - debut;
+                return attendre(Math.max(0, DELAI_MINIMUM_FRAPPE_MS - ecoule)).then(() => data);
+            })
+            .then((data) => {
+                indicateur.remove();
                 ajouterMessage(data.reponse, "bot");
             })
             .catch((erreur) => {
                 console.error("Erreur lors de l'appel à l'API :", erreur);
+                indicateur.remove();
                 ajouterMessage("Désolé, une erreur technique est survenue.", "bot");
             });
     });
+
+    // Salutation affichee des l'ouverture du widget, avant toute question.
+    ajouterMessage(MESSAGE_ACCUEIL, "bot");
 </script>

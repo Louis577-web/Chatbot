@@ -30,6 +30,7 @@ class Conversation(models.Model):
         ("RF1", "Réponse FAQ"),
         ("RF2", "Recherche de document"),
         ("RF3", "Guidage utilisateur"),
+        ("RF4", "Salutations"),
         ("RF5", "Hors périmètre"),
     ]
 

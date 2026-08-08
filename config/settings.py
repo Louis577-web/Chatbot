@@ -1,3 +1,7 @@
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
 """
 Django settings for config project.
 
@@ -37,8 +41,18 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django_ratelimit',
     'chatbot',
+    'site_principal',
 ]
+
+
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.db.DatabaseCache",
+        "LOCATION": "cache_table_ratelimit",
+    }
+}
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -78,8 +92,19 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    },
+    'site_principal': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ.get('SITE_PRINCIPAL_DB_NAME'),
+        'USER': os.environ.get('SITE_PRINCIPAL_DB_USER'),
+        'PASSWORD': os.environ.get('SITE_PRINCIPAL_DB_PASSWORD'),
+        'HOST': os.environ.get('SITE_PRINCIPAL_DB_HOST'),
+        'PORT': os.environ.get('SITE_PRINCIPAL_DB_PORT'),
+        'OPTIONS': {'sslmode': 'require'},
+    },
 }
+
+DATABASE_ROUTERS = ['chatbot.db_router.SitePrincipalRouter']
 
 
 # Password validation
@@ -122,3 +147,6 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+SILENCED_SYSTEM_CHECKS = ["django_ratelimit.E003"]
