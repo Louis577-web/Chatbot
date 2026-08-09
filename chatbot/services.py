@@ -6,6 +6,7 @@ from site_principal.models import Ressources
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from nltk.stem.snowball import SnowballStemmer
+import difflib
 import re
 import unicodedata
 
@@ -61,12 +62,16 @@ CANDIDATS_SEMANTIQUES = 20
 SEUIL_SEMANTIQUE_CANDIDAT = 0.30
 
 # Seuil applique UNIQUEMENT quand aucun mot-cle de la question n'est
-# retrouve dans le titre/la description (score_lex == 0) : le bruit
-# semantique pur (documents hors-sujet) peut alors monter jusqu'a ~0.51
-# sur des questions sans reponse reelle dans le corpus, donc 0.35 ne
-# suffit pas a filtrer ce cas. Sans mot-cle pour confirmer, on exige un
-# score brut nettement plus haut.
-SEUIL_SEMANTIQUE_SANS_LEXICAL = 0.55
+# retrouve dans le titre (score_lex == 0) : le bruit semantique pur
+# (documents hors-sujet) peut monter jusqu'a ~0.60 sur des questions avec
+# un mot tres generique ("suites"), donc 0.55 ne suffisait pas non plus a
+# filtrer ce cas ("GUIDE DE REDACTION DES THESES" a 0.603). Sans mot-cle
+# pour confirmer, on exige un score brut nettement plus haut. Note : ce
+# n'est pas une garantie absolue - le plafond du bruit semantique varie
+# selon la question (0.51 puis 0.60 observes), rien ne prouve qu'il ne
+# peut pas depasser 0.65 pour une autre formulation. C'est un compromis
+# empirique, pas une solution definitive.
+SEUIL_SEMANTIQUE_SANS_LEXICAL = 0.65
 
 # Mots "porteurs de requete" - le type de chose demandee plutot que son
 # sujet (ex: "je veux un DOCUMENT sur..."). Presents dans presque toutes
@@ -90,8 +95,8 @@ def _mots_cles_bruts(question):
     stemmes, mais accents deja retires) : un stem (ex: "vector" pour
     "vectoriel") n'est pas forcement une sous-chaine cherchable telle
     quelle dans un titre, donc on a besoin des mots dans leur forme
-    normale pour la recherche complementaire par mot-cle (voir
-    _candidats_par_mot_cle)."""
+    normale pour la recherche complementaire par mot-cle et le score
+    lexical (voir _candidats_par_mot_cle et _score_lexical)."""
     texte = _normaliser_accents(question)
     mots = re.findall(r"\b\w\w+\b", texte)
     resultat = []
@@ -104,11 +109,121 @@ def _mots_cles_bruts(question):
     return resultat
 
 
+def _mots_titre(ressource):
+    """Mots du titre d'une ressource, accents retires, prets a etre
+    compares (exactement ou approximativement) aux mots-cles bruts de
+    la question."""
+    return re.findall(r"\b\w\w+\b", _normaliser_accents(ressource.nom))
+
+
+# Ratio difflib (0-1) au-dela duquel deux mots sont consideres comme "la
+# meme faute de frappe pres". Calibre pour rattraper une faute typique
+# (une lettre manquante/en trop/inversee) sans devenir trop permissif :
+# teste sur "tologie" vs "topologie" -> ratio ~0.875 (rattrape), largement
+# au-dessus du seuil.
+SEUIL_SIMILARITE_FLOUE = 0.82
+
+# En dessous de cette longueur, un mot est trop court pour qu'une
+# comparaison approximative ait un sens (une seule lettre de difference
+# represente deja une trop grande partie du mot, risque de faux positifs
+# entre mots courts sans rapport) : on exige alors une correspondance
+# exacte ou une sous-chaine.
+LONGUEUR_MIN_COMPARAISON_FLOUE = 5
+
+
+def _mots_correspondent(mot_question, mot_titre):
+    """Un mot de la question "correspond" a un mot du titre si l'un est
+    une sous-chaine de l'autre (gere pluriels, radicaux : "vectoriel"
+    dans "vectoriels", "serie" dans "series" une fois les accents
+    retires), OU si les deux sont suffisamment proches au sens de
+    difflib (tolerance aux fautes de frappe, ex: "tologie" ~ "topologie",
+    testee et necessaire - une simple faute de frappe empechait de
+    trouver un document existant, la comparaison exacte ne suffisait
+    pas)."""
+    if mot_question in mot_titre or mot_titre in mot_question:
+        return True
+    if len(mot_question) < LONGUEUR_MIN_COMPARAISON_FLOUE or len(mot_titre) < LONGUEUR_MIN_COMPARAISON_FLOUE:
+        return False
+    return difflib.SequenceMatcher(None, mot_question, mot_titre).ratio() >= SEUIL_SIMILARITE_FLOUE
+
+
+# Dictionnaire de synonymes de discipline. Necessaire car aucun titre de
+# cours specifique ne contient litteralement le mot "math", "physique" ou
+# "info" - les titres reels utilisent le nom precis du chapitre (Algebre
+# Lineaire, Suites et Series, Topologie, Mecanique du point...). Teste sur
+# "je veux un document de math" : le mot-cle "math" ne correspondait a
+# rien de pertinent (aucun cours ne s'appelle "Math"), seuls les 2 tests
+# de recrutement (titre contenant litteralement "Mathematiques") et le
+# CATALOGUE DES FILIERES (bruit semantique pur au-dessus du seuil sans
+# lexical) remontaient - aucun vrai cours de maths.
+#
+# Chaque valeur est un ensemble de mots-cles (accents deja retires)
+# frequents dans les titres des cours de cette discipline, construit a
+# partir de la liste reelle des matieres en base (contributeur_matieres).
+# Ce n'est pas une taxonomie exhaustive/officielle, juste une liste
+# pragmatique batie sur les intitules de cours reellement presents sur la
+# plateforme - a completer si de nouveaux types de cours sont ajoutes.
+DISCIPLINES = {
+    frozenset({"math", "maths", "mathematique", "mathematiques"}): {
+        "algebre", "analyse", "calcul", "suite", "suites", "serie", "series",
+        "geometrie", "topologie", "probabilite", "probabilites",
+        "statistique", "statistiques", "equation", "equations",
+        "integration", "integrale", "integrales", "integral", "variable",
+        "variables", "matriciel", "vectoriel", "vectoriels", "vectoriel",
+        "espace", "logique", "numerique", "groupes", "anneaux",
+        "bilineaire", "lineaire", "derivable", "derivables", "fonctions",
+        "nombres",
+    },
+    frozenset({"info", "infos", "informatique", "informatiques"}): {
+        "algorithme", "algorithmes", "programmation", "python", "django",
+        "cloud", "iot", "logiciel", "reseau", "architecture", "ordinateurs",
+        "machine", "learning", "donnees", "scilab", "big", "data", "web",
+    },
+    frozenset({"physique", "physiques"}): {
+        "mecanique", "optique", "electricite", "electromagnetisme",
+        "thermodynamique", "elasticite", "tensoriel", "electronique",
+        "quantique", "mmc",
+    },
+}
+
+
+def _mots_cles_discipline(mot_normalise):
+    """Si mot_normalise est un synonyme de discipline connu (ex: "math"),
+    renvoie l'ensemble des mots-cles de cette discipline. Sinon None."""
+    for declencheurs, mots_cles in DISCIPLINES.items():
+        if mot_normalise in declencheurs:
+            return mots_cles
+    return None
+
+
+def _mot_correspond_a_ressource(mot_question, mots_titre):
+    """Un mot de la question correspond a une ressource si le mot
+    lui-meme matche un des mots du titre (voir _mots_correspondent :
+    sous-chaine ou faute de frappe proche), OU si le mot est un
+    synonyme de discipline (ex: "math") et qu'un des mots-cles de
+    cette discipline apparait dans le titre. Ce deuxieme cas permet a
+    une recherche par categorie large ("un document de math") de
+    trouver les cours specifiques (Algebre Lineaire, Topologie...) sans
+    que leur titre contienne le mot "math" lui-meme."""
+    if any(_mots_correspondent(mot_question, mot_titre) for mot_titre in mots_titre):
+        return True
+    mots_cles_discipline = _mots_cles_discipline(mot_question)
+    if mots_cles_discipline:
+        return any(
+            mot_cle in mot_titre or mot_titre in mot_cle
+            for mot_cle in mots_cles_discipline
+            for mot_titre in mots_titre
+        )
+    return False
+
+
 def _candidats_par_mot_cle(question, limite=10):
-    """Recherche complementaire DIRECTE dans les titres/descriptions,
-    pour ne jamais rater un document dont le titre contient litteralement
-    un mot-cle de la question, meme s'il n'est pas remonte dans le pool
-    des CANDIDATS_SEMANTIQUES meilleurs candidats par embeddings.
+    """Recherche complementaire DIRECTE dans les TITRES uniquement (pas
+    les descriptions - voir _score_lexical pour la raison), pour ne
+    jamais rater un document dont le titre contient (exactement ou avec
+    une faute de frappe proche) un mot-cle de la question, meme s'il
+    n'est pas remonte dans le pool des CANDIDATS_SEMANTIQUES meilleurs
+    candidats par embeddings.
 
     Teste et necessaire : pour la question "sujet d'examen sur les
     series", le document "Suites et Series" scorait 0.56 en semantique
@@ -133,23 +248,76 @@ def _candidats_par_mot_cle(question, limite=10):
 
     candidats = []
     for ressource in Ressources.objects.select_related("ecole", "pays").all():
-        texte = _normaliser_accents(f"{ressource.nom} {ressource.description}")
-        if any(mot in texte for mot in mots):
+        mots_titre = _mots_titre(ressource)
+        if any(_mot_correspond_a_ressource(mot, mots_titre) for mot in mots):
             candidats.append(ressource)
             if len(candidats) >= limite:
                 break
     return candidats
 
 
-def _score_lexical(question, texte):
-    """Fraction des mots-cles significatifs de la question retrouves dans
-    le texte (titre + description d'une ressource). 0 si la question ne
-    contient aucun mot-cle significatif (que des mots vides/generiques)."""
-    mots_question = _stemmes_utiles(question)
+def _score_lexical(question, ressource):
+    """Fraction des mots-cles de la question retrouves (exactement ou
+    approximativement - voir _mots_correspondent) dans le TITRE de la
+    ressource (nom) UNIQUEMENT - pas la description.
+
+    Restriction au titre teste et necessaire : pour la question "un
+    document sur les suites", la ressource "TEST EXPRESSION" (un test de
+    comprehension du francais, hors-sujet) contenait le mot "suite" dans
+    sa description ("la SUITE probable dans le developpement d'un
+    message") - mais au sens de "ce qui suit", pas de "suite
+    mathematique". Le mot etait identique, le sens different, et le
+    score lexical la faisait remonter en tete (0.78) devant le vrai
+    document sur les suites. Un titre est court et cure pour refleter le
+    sujet reel ; une description longue en texte libre est bien plus
+    sujette a ce genre de collision de sens.
+
+    Tolerance aux fautes de frappe testee et necessaire : sans elle, une
+    question comme "un document de tologie" (faute de frappe pour
+    "topologie") ne retrouvait jamais le document "Topologie + Corriges"
+    qui existe pourtant bel et bien, faute de correspondance exacte."""
+    mots_question = _mots_cles_bruts(question)
     if not mots_question:
         return 0.0
-    mots_texte = _stemmes_utiles(texte)
-    return len(mots_question & mots_texte) / len(mots_question)
+    mots_titre = _mots_titre(ressource)
+    trouves = sum(
+        1 for mot in mots_question
+        if _mot_correspond_a_ressource(mot, mots_titre)
+    )
+    return trouves / len(mots_question)
+
+
+def _vocabulaire_titres():
+    """Ensemble de tous les mots (accents retires) apparaissant dans les
+    titres des ressources reelles. Sert de reference pour distinguer un
+    vrai mot utilise sur la plateforme d'un charabia sans rapport (ex:
+    "ahyyy") - voir _mot_est_plausible.
+
+    Recalcule a chaque appel plutot que mis en cache : avec seulement
+    ~182 ressources, le cout est negligeable, et ca reste toujours a jour
+    si de nouveaux documents sont ajoutes/indexes entre deux questions."""
+    vocabulaire = set()
+    for ressource in Ressources.objects.all():
+        vocabulaire.update(_mots_titre(ressource))
+    return vocabulaire
+
+
+def _mot_est_plausible(mot, vocabulaire):
+    """Un mot de la question est "plausible" s'il correspond (exactement
+    ou approximativement) a un mot reellement present dans un titre de
+    document, OU s'il declenche une des DISCIPLINES connues (ex: "math"
+    lui-meme n'apparait dans aucun titre, mais reste un mot-cle valide).
+
+    Sert de garde-fou dans rechercher_documents : sans ca, une saisie
+    absurde ("ahyyy") peut tout de meme depasser SEUIL_SEMANTIQUE_SANS_LEXICAL
+    par hasard - l'embedding d'un texte, meme denue de sens, a toujours
+    une similarite cosinus non nulle avec les documents indexes, et rien
+    ne garantit qu'elle reste sous le seuil. Teste et necessaire : "ahyyy"
+    faisait remonter "SUJETS CONCOURS BACHELIERS ESATIC 2021", totalement
+    sans rapport."""
+    if _mots_cles_discipline(mot) is not None:
+        return True
+    return any(_mots_correspondent(mot, mot_vocab) for mot_vocab in vocabulaire)
 
 
 BASE_URL_SITE = "https://valideurlmd.com"
@@ -228,12 +396,17 @@ def rechercher_documents(question, top_k=3):
 
     liens_par_id = _construire_liens(list(scores_semantiques))
 
+    # Calcules une seule fois (pas par document candidat) : reutilises
+    # dans le garde-fou anti-charabia ci-dessous.
+    mots_question = _mots_cles_bruts(question)
+    vocabulaire = _vocabulaire_titres()
+
     sortie = []
     for rid, score_sem in scores_semantiques.items():
         ressource = ressources_par_id.get(rid)
         if ressource is None:
             continue
-        score_lex = _score_lexical(question, f"{ressource.nom} {ressource.description}")
+        score_lex = _score_lexical(question, ressource)
         score_final = score_sem + POIDS_LEXICAL * score_lex
 
         if score_lex == 0:
@@ -245,6 +418,15 @@ def rechercher_documents(question, top_k=3):
             # montait jusqu'a 0.51 sans qu'aucun document ne soit vraiment
             # pertinent - 0.35 est trop bas pour filtrer ce cas.
             if score_sem < SEUIL_SEMANTIQUE_SANS_LEXICAL:
+                continue
+            # Garde-fou supplementaire : meme au-dessus du seuil, on
+            # n'accepte un match "sans lexical" que si au moins un mot de
+            # la question ressemble a un vrai terme utilise sur la
+            # plateforme (ou une discipline connue). Sans ca, une saisie
+            # absurde ("ahyyy") pouvait par hasard depasser le seuil
+            # semantique et faire remonter un document totalement
+            # sans rapport (teste : "SUJETS CONCOURS BACHELIERS ESATIC").
+            if not any(_mot_est_plausible(mot, vocabulaire) for mot in mots_question):
                 continue
         elif score_final < SEUIL_PERTINENCE_DOCUMENT:
             continue

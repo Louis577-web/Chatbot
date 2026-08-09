@@ -1,13 +1,48 @@
+<div id="chatbot-lanceur" title="Ouvrir le chat">💬</div>
+
 <div id="chatbot-widget">
-    <div id="chatbot-header">Assistant Valideur LMD</div>
+    <div id="chatbot-header">
+        <span>Assistant Valideur LMD</span>
+        <button id="chatbot-fermer" type="button" aria-label="Fermer le chat">&times;</button>
+    </div>
     <div id="chatbot-messages"></div>
     <form id="chatbot-form">
         <input type="text" id="chatbot-input" placeholder="Comment puis-je vous aider ?" autocomplete="off">
         <button type="submit">Envoyer</button>
     </form>
 </div>
+
 <style>
+    /* Icone flottante, visible en permanence tant que le chat est ferme.
+       C'est elle qui garde une empreinte minimale sur la page - le panneau
+       complet ne s'affiche qu'au clic (voir #chatbot-widget plus bas). */
+    #chatbot-lanceur {
+        position: fixed;
+        bottom: 24px;
+        right: 24px;
+        width: 56px;
+        height: 56px;
+        border-radius: 50%;
+        background-color: #F97316;
+        color: #FFFFFF;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 26px;
+        cursor: pointer;
+        box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
+        z-index: 1000;
+        transition: transform 0.15s ease;
+        user-select: none;
+    }
+    #chatbot-lanceur:hover {
+        transform: scale(1.06);
+    }
+
+    /* Cache par defaut (via JS au clic sur le lanceur) - display:none ici
+       evite aussi un flash du panneau ouvert avant que le JS ne s'execute. */
     #chatbot-widget {
+        display: none;
         position: fixed;
         bottom: 24px;
         right: 24px;
@@ -16,7 +51,6 @@
         background-color: #FFFFFF;
         border-radius: 16px;
         box-shadow: 0 8px 30px rgba(0, 0, 0, 0.15);
-        display: flex;
         flex-direction: column;
         overflow: hidden;
         font-family: -apple-system, sans-serif;
@@ -28,6 +62,18 @@
         padding: 16px;
         font-weight: bold;
         font-size: 15px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+    #chatbot-fermer {
+        background: none;
+        border: none;
+        color: #FFFFFF;
+        font-size: 20px;
+        line-height: 1;
+        cursor: pointer;
+        padding: 0 0 0 12px;
     }
     #chatbot-messages {
         flex: 1;
@@ -103,7 +149,7 @@
     #chatbot-input:focus {
         border-color: #F97316;
     }
-    #chatbot-form button {
+    #chatbot-form button[type="submit"] {
         background-color: #F97316;
         color: #FFFFFF;
         border: none;
@@ -113,11 +159,14 @@
         font-weight: bold;
         cursor: pointer;
     }
-    #chatbot-form button:hover {
+    #chatbot-form button[type="submit"]:hover {
         background-color: #EA580C;
     }
 </style>
 <script>
+    const lanceur = document.getElementById("chatbot-lanceur");
+    const widget = document.getElementById("chatbot-widget");
+    const boutonFermer = document.getElementById("chatbot-fermer");
     const form = document.getElementById("chatbot-form");
     const input = document.getElementById("chatbot-input");
     const messages = document.getElementById("chatbot-messages");
@@ -126,6 +175,29 @@
     // (chatbot/services.py) - affiche ici directement, sans appel API,
     // pour eviter de journaliser une fausse conversation au chargement.
     const MESSAGE_ACCUEIL = "Bonjour ! Je suis l'assistant de Valideur LMD. Pose-moi une question sur la plateforme, ou dis-moi quel document tu cherches.";
+
+    // La salutation ne s'affiche qu'a la PREMIERE ouverture du chat (pas a
+    // chaque fois qu'on rouvre le panneau), pour ne pas la repeter si
+    // l'utilisateur ferme puis rouvre en cours de conversation.
+    let salutationAffichee = false;
+
+    function ouvrirChat() {
+        widget.style.display = "flex";
+        lanceur.style.display = "none";
+        if (!salutationAffichee) {
+            ajouterMessage(MESSAGE_ACCUEIL, "bot");
+            salutationAffichee = true;
+        }
+        input.focus();
+    }
+
+    function fermerChat() {
+        widget.style.display = "none";
+        lanceur.style.display = "flex";
+    }
+
+    lanceur.addEventListener("click", ouvrirChat);
+    boutonFermer.addEventListener("click", fermerChat);
 
     function echapperHTML(texte) {
         const div = document.createElement("div");
@@ -211,7 +283,4 @@
                 ajouterMessage("Désolé, une erreur technique est survenue.", "bot");
             });
     });
-
-    // Salutation affichee des l'ouverture du widget, avant toute question.
-    ajouterMessage(MESSAGE_ACCUEIL, "bot");
 </script>
