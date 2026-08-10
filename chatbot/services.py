@@ -2,7 +2,13 @@ from django.db import connections
 
 from .models import FAQEntry, Conversation
 from .recherche_contenu import rechercher_par_contenu
-from site_principal.models import Ressources
+from site_principal.models import (
+    Ressources,
+    RessourcesAcademique,
+    RessourcesConcours,
+    RessourcesAdministratif,
+    RessourcesPro,
+)
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from nltk.stem.snowball import SnowballStemmer
@@ -322,40 +328,83 @@ def _mot_est_plausible(mot, vocabulaire):
 
 BASE_URL_SITE = "https://valideurlmd.com"
 
+# Segment d'URL propre a chaque type de ressource, verifie directement sur
+# le site (exemples reels donnes par Louis) :
+#   ressource_pro           -> https://valideurlmd.com/details/ressource_pro/<slug>/
+#   ressource_administrative -> https://valideurlmd.com/details/ressource_administrative/<slug>/
+#   ressource_concours      -> https://valideurlmd.com/details/ressource_concours/<slug>/
+#   ressource_academique    -> https://valideurlmd.com/details/ressource_academique/<slug>/
+# Cle = nom du type cote Python (attribut ajoute par _types_ressources),
+# valeur = segment reel dans l'URL (attention : "administratif" en base
+# devient "administrative" dans l'URL, accord au feminin avec "ressource").
+SEGMENT_URL_PAR_TYPE = {
+    "academique": "ressource_academique",
+    "concours": "ressource_concours",
+    "administratif": "ressource_administrative",
+    "pro": "ressource_pro",
+}
+
+
+def _types_ressources(ids_ressources):
+    """Determine le type (academique/concours/administratif/pro) de
+    chaque ressource, en interrogeant les 4 tables de sous-type. Chaque
+    ressource appartient a exactement un seul de ces 4 types (relation
+    OneToOne obligatoire cote modele)."""
+    if not ids_ressources:
+        return {}
+    types = {}
+    for modele, nom_type in (
+        (RessourcesAcademique, "academique"),
+        (RessourcesConcours, "concours"),
+        (RessourcesAdministratif, "administratif"),
+        (RessourcesPro, "pro"),
+    ):
+        for rid in modele.objects.filter(ressources_id__in=ids_ressources).values_list("ressources_id", flat=True):
+            types[rid] = nom_type
+    return types
+
 
 def _construire_liens(ids_ressources):
-    """Construit les liens publics d'acces aux documents, en remontant
-    Ressources -> documentvente -> pack (contributeur_packdocumentedition),
-    via une requete SQL groupee (pas de modele Django pour ces tables,
-    la base du site principal etant en lecture seule).
+    """Construit les liens publics d'acces aux documents, a partir du
+    slug de vente individuel (contributeur_documentvente.slug) et du
+    type de la ressource (voir SEGMENT_URL_PAR_TYPE).
 
-    Renvoie un dict {ressource_id: url}. Un document qui n'a pas de pack
-    associe (ex: certains documents administratifs) n'apparait simplement
-    pas dans le dict : on gere ce cas cote appelant en n'affichant pas de
-    lien plutot que de planter.
+    Corrige un bug reel : la version precedente ne construisait un lien
+    qu'en passant par un PACK (contributeur_packdocumentedition), ce qui
+    ratait tout document vendu individuellement sans faire partie d'un
+    pack - teste et confirme sur "Python pour la Data Science" et "Big
+    Data avec MongoDB" (documentvente existant, mais aucun pack associe :
+    ces documents n'affichaient donc jamais de lien). Chaque ressource a
+    une entree documentvente (avec son propre slug), qu'elle soit ou non
+    en plus regroupee dans un pack - c'est donc une base plus fiable et
+    plus universelle pour construire le lien que de dependre d'un pack.
 
-    Note : le segment d'URL "pack_ressource_academique" a ete verifie
-    pour des ressources academiques (types RessourcesAcademique). Il est
-    possible que les documents de type concours/administratif/pro suivent
-    un autre schema d'URL sur le site - a verifier si des liens errones
-    apparaissent pour ces types-la."""
+    Renvoie un dict {ressource_id: url}. Une ressource sans documentvente
+    ou sans type reconnu n'apparait simplement pas dans le dict : gere
+    cote appelant en n'affichant pas de lien plutot que de planter."""
     if not ids_ressources:
         return {}
 
     placeholders = ",".join(["%s"] * len(ids_ressources))
     sql = f"""
-        SELECT dv.ressource_id, pde.slug
-        FROM contributeur_documentvente dv
-        JOIN contributeur_packdocumentedition_pack link ON link.documentvente_id = dv.id
-        JOIN contributeur_packdocumentedition pde ON pde.id = link.packdocumentedition_id
-        WHERE dv.ressource_id IN ({placeholders})
+        SELECT ressource_id, slug
+        FROM contributeur_documentvente
+        WHERE ressource_id IN ({placeholders})
     """
-    liens = {}
+    slugs = {}
     with connections["site_principal"].cursor() as cur:
         cur.execute(sql, ids_ressources)
         for ressource_id, slug in cur.fetchall():
-            if ressource_id not in liens:  # on garde le premier pack trouve
-                liens[ressource_id] = f"{BASE_URL_SITE}/details/pack_ressource_academique/{slug}/"
+            if ressource_id not in slugs:  # on garde la premiere vente trouvee
+                slugs[ressource_id] = slug
+
+    types = _types_ressources(list(slugs))
+
+    liens = {}
+    for rid, slug in slugs.items():
+        segment = SEGMENT_URL_PAR_TYPE.get(types.get(rid))
+        if segment:
+            liens[rid] = f"{BASE_URL_SITE}/details/{segment}/{slug}/"
     return liens
 
 
