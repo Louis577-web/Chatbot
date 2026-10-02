@@ -1,7 +1,5 @@
 from django.db import models
 
-from django.db import models
-
 #Base de données pour les questions fréquentes (FAQ)
 class FAQEntry(models.Model):
     question = models.CharField(max_length=255)
@@ -12,8 +10,22 @@ class FAQEntry(models.Model):
     def __str__(self):
         return self.question
 
+
 #Base de données pour les documents validés
 class DocumentValide(models.Model):
+
+    # Lien entre le document validé et la ressource originale.
+    # null=True et blank=True sont TEMPORAIRES : ils permettent
+    # d'ajouter ce nouveau champ sans casser les anciens documents
+    # déjà présents dans la base de données.
+    ressource = models.OneToOneField(
+        "contributeur.Ressources",
+        on_delete=models.CASCADE,
+        related_name="document_valide",
+        null=True,
+        blank=True,
+    )
+
     titre = models.CharField(max_length=255)
     matiere = models.CharField(max_length=100)
     niveau = models.CharField(max_length=50)
@@ -23,7 +35,7 @@ class DocumentValide(models.Model):
 
     def __str__(self):
         return self.titre
-
+    
 #Base de données pour les conversations du chatbot
 class Conversation(models.Model):
     BESOIN_CHOICES = [

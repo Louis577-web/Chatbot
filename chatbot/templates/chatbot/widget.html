@@ -145,9 +145,15 @@
         padding: 10px 14px;
         font-size: 14px;
         outline: none;
+        color: #1B2A4A;
+        background-color: #FFFFFF;
     }
     #chatbot-input:focus {
         border-color: #F97316;
+    }
+    #chatbot-input::placeholder {
+        color: #9CA3AF;
+        opacity: 1;
     }
     #chatbot-form button[type="submit"] {
         background-color: #F97316;
@@ -213,7 +219,7 @@
         const echappe = echapperHTML(texte);
         return echappe.replace(
             /(https?:\/\/[^\s<]+)/g,
-            '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>'
+            '<a href="$1">$1</a>'
         );
     }
 

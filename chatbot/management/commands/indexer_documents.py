@@ -1,5 +1,5 @@
 from django.core.management.base import BaseCommand
-from site_principal.models import Ressources
+from contributeur.models import Ressources
 from chatbot.recherche_contenu import indexer_ressource
 
 
@@ -10,7 +10,10 @@ class Command(BaseCommand):
         parser.add_argument("--limite", type=int, default=None)
 
     def handle(self, *args, **options):
-        queryset = Ressources.objects.all().order_by("id")
+        queryset = Ressources.objects.filter(
+            documentvente__statut="publié"
+        ).distinct().order_by("id")
+
         if options["limite"]:
             queryset = queryset[:options["limite"]]
 

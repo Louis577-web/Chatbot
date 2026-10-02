@@ -1,8 +1,9 @@
+from django.conf import settings
 from django.db import connections
 
 from .models import FAQEntry, Conversation
 from .recherche_contenu import rechercher_par_contenu
-from site_principal.models import (
+from contributeur.models import (
     Ressources,
     RessourcesAcademique,
     RessourcesConcours,
@@ -326,7 +327,7 @@ def _mot_est_plausible(mot, vocabulaire):
     return any(_mots_correspondent(mot, mot_vocab) for mot_vocab in vocabulaire)
 
 
-BASE_URL_SITE = "https://valideurlmd.com"
+BASE_URL_SITE = settings.BASE_URL_SITE
 
 # Segment d'URL propre a chaque type de ressource, verifie directement sur
 # le site (exemples reels donnes par Louis) :
@@ -348,8 +349,13 @@ SEGMENT_URL_PAR_TYPE = {
 def _types_ressources(ids_ressources):
     """Determine le type (academique/concours/administratif/pro) de
     chaque ressource, en interrogeant les 4 tables de sous-type. Chaque
-    ressource appartient a exactement un seul de ces 4 types (relation
-    OneToOne obligatoire cote modele)."""
+    ressource appartient a exactement un seul de ces 4 types.
+
+    Dans le vrai projet, RessourcesAcademique/Concours/Administratif/Pro
+    heritent de Ressources par heritage Python classique (pas une
+    relation OneToOne manuelle comme dans le mirroir de test) : la cle
+    primaire de la sous-classe EST la meme que celle de Ressources, donc
+    on filtre sur pk__in (pas ressources_id__in)."""
     if not ids_ressources:
         return {}
     types = {}
@@ -359,7 +365,7 @@ def _types_ressources(ids_ressources):
         (RessourcesAdministratif, "administratif"),
         (RessourcesPro, "pro"),
     ):
-        for rid in modele.objects.filter(ressources_id__in=ids_ressources).values_list("ressources_id", flat=True):
+        for rid in modele.objects.filter(pk__in=ids_ressources).values_list("pk", flat=True):
             types[rid] = nom_type
     return types
 
@@ -369,15 +375,9 @@ def _construire_liens(ids_ressources):
     slug de vente individuel (contributeur_documentvente.slug) et du
     type de la ressource (voir SEGMENT_URL_PAR_TYPE).
 
-    Corrige un bug reel : la version precedente ne construisait un lien
-    qu'en passant par un PACK (contributeur_packdocumentedition), ce qui
-    ratait tout document vendu individuellement sans faire partie d'un
-    pack - teste et confirme sur "Python pour la Data Science" et "Big
-    Data avec MongoDB" (documentvente existant, mais aucun pack associe :
-    ces documents n'affichaient donc jamais de lien). Chaque ressource a
-    une entree documentvente (avec son propre slug), qu'elle soit ou non
-    en plus regroupee dans un pack - c'est donc une base plus fiable et
-    plus universelle pour construire le lien que de dependre d'un pack.
+    Chaque ressource a une entree documentvente (avec son propre slug),
+    qu'elle soit ou non en plus regroupee dans un pack - c'est donc une
+    base fiable et universelle pour construire le lien.
 
     Renvoie un dict {ressource_id: url}. Une ressource sans documentvente
     ou sans type reconnu n'apparait simplement pas dans le dict : gere
@@ -390,21 +390,33 @@ def _construire_liens(ids_ressources):
         SELECT ressource_id, slug
         FROM contributeur_documentvente
         WHERE ressource_id IN ({placeholders})
+          AND statut = 'Publié'
+          AND slug IS NOT NULL
+          AND slug != ''
     """
     slugs = {}
-    with connections["site_principal"].cursor() as cur:
+    with connections["default"].cursor() as cur:
         cur.execute(sql, ids_ressources)
         for ressource_id, slug in cur.fetchall():
             if ressource_id not in slugs:  # on garde la premiere vente trouvee
                 slugs[ressource_id] = slug
+                print(
+                    f"Document publié trouvé : "
+                    f"ressource={ressource_id}, slug={slug}"
+                )
 
     types = _types_ressources(list(slugs))
 
     liens = {}
     for rid, slug in slugs.items():
         segment = SEGMENT_URL_PAR_TYPE.get(types.get(rid))
-        if segment:
-            liens[rid] = f"{BASE_URL_SITE}/details/{segment}/{slug}/"
+        if not segment:
+            print(
+                f"Pas de segment URL : "
+                f"ressource={rid}, type={types.get(rid)}"
+            )
+            continue
+        liens[rid] = f"{BASE_URL_SITE}/details/{segment}/{slug}/"
     return liens
 
 
@@ -427,8 +439,14 @@ def rechercher_documents(question, top_k=3):
     ressources_par_id = {}
     if scores_semantiques:
         ressources_par_id = {
-            r.id: r for r in Ressources.objects.select_related("ecole", "pays")
-            .filter(id__in=scores_semantiques)
+            r.id: r for r in (
+                Ressources.objects
+                .filter(
+                    documentvente__statut="publié",
+                    id__in=scores_semantiques,
+                )
+                .select_related("ecole", "pays")
+            )
         }
 
     # Complement mot-cle : un document trouve ainsi mais absent du pool
@@ -455,6 +473,13 @@ def rechercher_documents(question, top_k=3):
         ressource = ressources_par_id.get(rid)
         if ressource is None:
             continue
+
+        lien = liens_par_id.get(rid)
+
+        # Sans lien public, on retire complètement la ressource des résultats
+        if not lien:
+            continue
+
         score_lex = _score_lexical(question, ressource)
         score_final = score_sem + POIDS_LEXICAL * score_lex
 
@@ -471,16 +496,13 @@ def rechercher_documents(question, top_k=3):
             # Garde-fou supplementaire : meme au-dessus du seuil, on
             # n'accepte un match "sans lexical" que si au moins un mot de
             # la question ressemble a un vrai terme utilise sur la
-            # plateforme (ou une discipline connue). Sans ca, une saisie
-            # absurde ("ahyyy") pouvait par hasard depasser le seuil
-            # semantique et faire remonter un document totalement
-            # sans rapport (teste : "SUJETS CONCOURS BACHELIERS ESATIC").
+            # plateforme (ou une discipline connue).
             if not any(_mot_est_plausible(mot, vocabulaire) for mot in mots_question):
                 continue
         elif score_final < SEUIL_PERTINENCE_DOCUMENT:
             continue
 
-        sortie.append((ressource, score_final, liens_par_id.get(rid)))
+        sortie.append((ressource, score_final, lien))
 
     sortie.sort(key=lambda triplet: triplet[1], reverse=True)
     return sortie[:top_k]
@@ -565,9 +587,6 @@ def repondre(question):
             reponse = entree.reponse
             sources = []
         elif not _stemmes_utiles(question):
-            # Aucun mot-cle significatif dans la question (que des mots
-            # vides/generiques) : lancer la recherche donnerait un
-            # resultat quasi aleatoire plutot qu'une vraie non-reponse.
             reponse = (
                 "Je n'ai pas bien compris ta demande. Peux-tu préciser le sujet, "
                 "la matière ou le type de document que tu cherches ?"
